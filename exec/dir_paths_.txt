@@ -1,2 +1,3 @@
 inp_dir='/scratch/htc/fsafarov/structures/8ef5_july_2025/8ef5/'
-dcd_dir = '/scratch/htc/fsafarov/mOR_dcd_files/npat'
+dcd_dir = '/scratch/htc/fsafarov/mOR_dcd_files/npat/'
+out_dir = '/scratch/htc/fsafarov/ISOKANN_PINN/output/'

@@ -8,6 +8,7 @@ from sklearn.model_selection import train_test_split
 import logging
 import sys
 from torch.utils.data import TensorDataset, DataLoader
+from torch.func import hessian, vmap
 
 device = pt.device("cuda" if pt.cuda.is_available() else "cpu")
 
@@ -41,7 +42,7 @@ class MLP(pt.nn.Module):
         for i, (dim_in, dim_out) in enumerate(zip(dims_in, dims_out)):
             layers.append(torch.nn.Linear(dim_in, dim_out))
 
-            if i < len(n_units) - 2:
+            if i < self.Nhiddenlayers:
                 layers.append(self.activation)
 
         self._layers = torch.nn.Sequential(*layers)
@@ -64,7 +65,8 @@ def nabla_chi(model, x):
     out: (B,m,1)  (Jacobian per sample)
     """
     x = x.requires_grad_(True)
-    chi = model(x)  # (B,m)
+    
+    chi = model(x)
 
     grads = []
     m = chi.shape[1]
@@ -83,16 +85,45 @@ def nabla_chi(model, x):
 
 
 
-def laplacian_chi(x):
+# def laplacian_chi(grad_chi, x):
+    
+#     grad_chi.unsqueeze(-1)
+#     m = chi.shape[1]
+#     D = x.shape[1]
 
-    return x
+#     laplacians = []
+
+#     for i in range(m):
+
+#         gi = torch.autograd.grad(
+#             outputs=grad_chi[:,i].sum(),
+#             inputs=x,
+#             create_graph=True,
+#             retain_graph=True
+#         )[0]
+#         laplacians.append(gi)
+    
+#     L = torch.stack(laplacians, dim=1)
+
+#     return L
 
 
 
 
+def laplacian_operator(model, x):
+
+    H = hessian(model)(x)
+
+    return torch.trace(H)
 
 
 
+def generator_action(model, x, forces_fn, D):  # forces_fn(x) → b(x) (B,D)
+   
+    grad_chi = nabla_chi(model, x)
+    lap_chi = vmap(laplacian_operator, in_dims=(None, 0))(model, x)  # vmap over batch
+    b = forces_fn(x)
+    return (b * grad_chi).sum(-1) + D * lap_chi  # (B,)
 
 def trainNN(
             model,
@@ -100,12 +131,17 @@ def trainNN(
             wd, 
             Nepochs,
             batch_size,
-            momentum,
             patience,
             X,
             Y,
             potential_grad,
-            split=0.2
+            kB, 
+            T, 
+            gamma,
+            split=0.2,
+            momentum=None,
+            c1=0.01, 
+            c2=0.01
             ):
     
     best_loss = float('inf')
@@ -137,11 +173,31 @@ def trainNN(
 
             batch_x, batch_y = X_train[indices], Y_train[indices]
 
-            new_points  =  model(batch_x)
+            # batch_grad_V = potential_grad[indices]
 
-            new_points_grad = nabla_chi(model, new_points)
+            # new_points  =  model(batch_x)
 
-            inf_gen = -potential_grad*new_points_grad + laplacian_chi(new_points)
+            # new_points_grad = nabla_chi(model, batch_x)
+
+            # laplacian_chi = vmap(lambda v: laplacian_operator(model, v))
+
+            L_chi = generator_action(model, batch_x, forces_fn, D)
+
+            chi = model(batch_x)
+            residual = L_chi + c1 * chi.squeeze() - c2 * (1 - chi.squeeze())  # (B,)
+            pde_loss = mse_loss(residual, pt.zeros_like(residual))
+            reg_loss = mse_loss(chi.squeeze(), chi.squeeze() * 0) + mse_loss(1-chi.squeeze(), (1-chi.squeeze()) * 0)  
+            loss = pde_loss + 0.01 * reg_loss
+
+            loss.backward()
+            pt.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            optimizer.step()
+            train_loss += loss.item()
+
+
+             
+
+
 
 
 
