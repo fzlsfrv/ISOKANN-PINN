@@ -76,10 +76,10 @@ def nabla_chi(model, x):
             inputs=x,
             create_graph=True,
             retain_graph=True
-        )[0]  # (B,1)
+        )[0]  # (B,inp_dim)
         grads.append(gi)
 
-    G = torch.stack(grads, dim=1)  # (B,m,1)
+    G = torch.stack(grads, dim=2)  # (B,inp_dim, m)
     return G
 
 
@@ -118,12 +118,12 @@ def laplacian_operator(model, x):
 
 
 
-def generator_action(model, x, forces_fn, D):  # forces_fn(x) → b(x) (B,D)
+def generator_action(model, x, forces_fn, D):  
    
     grad_chi = nabla_chi(model, x)
     lap_chi = vmap(laplacian_operator, in_dims=(None, 0))(model, x)  # vmap over batch
     b = forces_fn(x)
-    return (b * grad_chi).sum(-1) + D * lap_chi  # (B,)
+    return (b * grad_chi).sum(-1) + D * lap_chi 
 
 def trainNN(
             model,
