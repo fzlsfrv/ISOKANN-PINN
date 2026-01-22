@@ -57,6 +57,39 @@ class MLP(pt.nn.Module):
 
 
 
+
+class ratesNN(nn.Module):
+    def __init__(self, mlp_network):
+
+        super.__init__()
+        self.net = mlp_network
+
+        self.c1_ = nn.Parameter(pt.tensor(-2.0))
+        self.c2_ = nn.Parameter(pt.tensor(-2.0))
+
+        self.softplus = nn.Softplus()
+
+    
+    @property
+    def c1(self):
+
+        return self.softplus(self.c1_)
+
+
+    @property
+    def c2(self):
+
+        return self.softplus(self.c2_)
+
+    
+    def forward(self, f):
+
+        return self.net(x)
+
+        
+
+
+
 def nabla_chi(model, x):
     """
     Returns d chi / d x.
@@ -80,7 +113,7 @@ def nabla_chi(model, x):
         grads.append(gi)
 
     G = torch.stack(grads, dim=2)  # (B,inp_dim, m)
-    return G
+    return chi, G
 
 
 
@@ -120,10 +153,16 @@ def laplacian_operator(model, x):
 
 def generator_action(model, x, forces_fn, D):  
    
-    grad_chi = nabla_chi(model, x)
+    chi, grad_chi = nabla_chi(model, x)
+
+    # None -> model, 0 -> batch dimensions of chi
     lap_chi = vmap(laplacian_operator, in_dims=(None, 0))(model, x)  # vmap over batch
-    b = forces_fn(x)
-    return (b * grad_chi).sum(-1) + D * lap_chi 
+    return chi, (forces_fn * grad_chi).sum(-1) + D * lap_chi 
+
+
+
+
+
 
 def trainNN(
             model,
@@ -132,27 +171,25 @@ def trainNN(
             Nepochs,
             batch_size,
             patience,
-            X,
-            Y,
+            dataset,
+            forces_fn,
+            optimizer, 
             potential_grad,
             kB, 
             T, 
             gamma,
             split=0.2,
-            momentum=None,
-            c1=0.01, 
-            c2=0.01
+            momentum=None
             ):
     
     best_loss = float('inf')
     patience_counter=0
 
-    # Split training and validation data
-    X_train, X_val, Y_train, Y_val = train_test_split(X, Y, test_size=split, random_state=42)
+    
 
     MSE = pt.nn.MSELoss()
 
-    optimizer = pt.optim.Adam(net.parameters(), lr=lr, weight_decay=wd)
+    # optimizer = pt.optim.Adam(net.parameters(), lr=lr, weight_decay=wd)
     # optimizer = pt.optim.SGD(net.parameters(), lr=lr, weight_decay=wd, momentum = momentum, nesterov=True)
     # optimizer = pt.optim.SGD(net.parameters(), lr=lr, weight_decay=wd)
 
@@ -164,33 +201,25 @@ def trainNN(
 
         permutation = pt.randperm(X_train.size()[0], device=device)
 
-        for i in range(0, X_train.size()[0], batch_size):
+        loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, drop_last=True)
+        
+        for (xb,) in loader:
 
             # Clear gradients for next training
             optimizer.zero_grad()
 
-            indices = permutation[i:i+batch_size]
+            xb = xb.to(device).float().requires_grad_(True)
 
-            batch_x, batch_y = X_train[indices], Y_train[indices]
+            chi_batch, L_chi = generator_action(model, xb, forces_fn, D)
 
-            # batch_grad_V = potential_grad[indices]
-
-            # new_points  =  model(batch_x)
-
-            # new_points_grad = nabla_chi(model, batch_x)
-
-            # laplacian_chi = vmap(lambda v: laplacian_operator(model, v))
-
-            L_chi = generator_action(model, batch_x, forces_fn, D)
-
-            chi = model(batch_x)
-            residual = L_chi + c1 * chi.squeeze() - c2 * (1 - chi.squeeze())  # (B,)
-            pde_loss = mse_loss(residual, pt.zeros_like(residual))
+            residual = L_chi + model.c1.item() * chi.squeeze() - model.c2.item() * (1 - chi.squeeze())  # (B,)
             reg_loss = mse_loss(chi.squeeze(), chi.squeeze() * 0) + mse_loss(1-chi.squeeze(), (1-chi.squeeze()) * 0)  
-            loss = pde_loss + 0.01 * reg_loss
+
+            
+            loss = residual + 0.01 * reg_loss
 
             loss.backward()
-            pt.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            # pt.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
             train_loss += loss.item()
 
