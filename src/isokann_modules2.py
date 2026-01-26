@@ -37,8 +37,6 @@ class MLP(pt.nn.Module):
             self.activation  = pt.nn.LeakyReLU(LeakyReLU_par)
         elif act_fun == 'gelu': 
             self.activation  = pt.nn.GELU()
-        elif act_fun == 'tanh':
-            self.activation = pt.nn.Tanh()
 
             
         layers = []
@@ -117,48 +115,33 @@ def nabla_chi(model, x):
         grads.append(gi)
 
     G = pt.stack(grads, dim=2)  # (B,inp_dim, m)
-    return chi, G
+    return G
 
 
 
 
-# def laplacian_chi(grad_chi, x):
+
+def laplacian_operator(model, x, h):
     
-#     grad_chi.unsqueeze(-1)
-#     m = chi.shape[1]
-#     D = x.shape[1]
+    h = pt.zeros_like(x) + 1e-3
 
-#     laplacians = []
+    chi_n = model(x)
+    chi_plus = model(x + h)
+    chi_minus = model(x - h)
 
-#     for i in range(m):
+    lap_chi = (chi_minus + chi_plus - 2*chi_n)/h**2
 
-#         gi = torch.autograd.grad(
-#             outputs=grad_chi[:,i].sum(),
-#             inputs=x,
-#             create_graph=True,
-#             retain_graph=True
-#         )[0]
-#         laplacians.append(gi)
+    return lap_chi
+
+
     
-#     L = torch.stack(laplacians, dim=1)
 
-#     return L
-
-
-
-
-def laplacian_operator(model, x):
-
-    H = hessian(model)(x)
-    H = H.squeeze(0)
-    # print(H.shape)
-    return pt.trace(H)
 
 
 
 def generator_action(model, x, forces_fn, D):  
    
-    chi, grad_chi = nabla_chi(model, x)
+    grad_chi = nabla_chi(model, x)
     # print(f"Gradient shape: {grad_chi.shape}")
     # print(f"Chi function shape {chi.shape}")
 
@@ -220,9 +203,7 @@ def trainNN(
             residual = L_chi + model.c1 * chi_batch.squeeze() - model.c2 * (1 - chi_batch.squeeze())  # (B,)
             reg_loss = MSE(chi_batch.squeeze(), chi_batch.squeeze() * 0) + MSE(1-chi_batch.squeeze(), (1-chi_batch.squeeze()) * 0)  
 
-            # loss_pinn = pt.mean(residual**2)
-            loss_pinn = MSE(residual, pt.zeros_like(residual))
-
+            loss_pinn = pt.mean(residual**2)
             loss = loss_pinn + lam_bound * reg_loss
 
             loss.backward()

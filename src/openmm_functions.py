@@ -163,7 +163,8 @@ def get_parameters(
                         integrator_type='Langevin',
                         psf=None,
                         get_potential_grad=False,
-                        get_coords=False
+                        get_coords=False,
+                        selection=None
                       ):
     if integrator_type=='Langevin':
         integrator = LangevinIntegrator(T*kelvin, gamma/picoseconds, dt*femtoseconds)
@@ -205,7 +206,13 @@ def get_parameters(
         return all_forces
     
 
+def select(
+            psf,
+            selection=None,
+            ):
+        
+    md_top = md.Topology.from_openmm(psf.topology)
+    indices = md_top.select(selection)
 
+    return indices
 
-
-    
