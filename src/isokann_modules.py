@@ -10,7 +10,8 @@ import sys
 
 import torch.nn as nn
 from torch.utils.data import TensorDataset, DataLoader
-from torch.func import hessian, vmap
+from torch.func import vmap, hessian
+# from torch.autograd.functional import hessian
 
 device = pt.device("cuda" if pt.cuda.is_available() else "cpu")
 
@@ -156,6 +157,25 @@ def laplacian_operator(model, x):
 
 
 
+# def laplacian_operator(model, x):
+#     x_vec = x.squeeze(0).squeeze(-1) if x.dim() > 1 else x.squeeze(-1)  
+    
+#     def scalar_fn(inputs):
+#         out = model(inputs.unsqueeze(0))  
+#         return out.squeeze(-1)
+    
+#     H = hessian(scalar_fn, x_vec, create_graph=True) 
+#     print(H.shape)  
+#     return pt.trace(H)
+
+
+
+
+
+
+
+
+
 def generator_action(model, x, forces_fn, D):  
    
     chi, grad_chi = nabla_chi(model, x)
@@ -164,7 +184,6 @@ def generator_action(model, x, forces_fn, D):
 
     # None -> model, 0 -> batch dimensions of chi
     lap_chi = vmap(laplacian_operator, in_dims=(None, 0))(model, x)  # vmap over batch
-
 
     # print(f"Laplacian chi shape: {lap_chi.shape}")
     return chi, (-0.4*forces_fn * grad_chi.squeeze(-1)).sum(dim=1) + D * lap_chi 
@@ -218,12 +237,16 @@ def trainNN(
             chi_batch, L_chi = generator_action(model, xb, fb, D)
 
             residual = L_chi + model.c1 * chi_batch.squeeze() - model.c2 * (1 - chi_batch.squeeze())  # (B,)
-            reg_loss = MSE(chi_batch.squeeze(), chi_batch.squeeze() * 0) + MSE(1-chi_batch.squeeze(), (1-chi_batch.squeeze()) * 0)  
+
+
+
+            # reg_loss = MSE(chi_batch.squeeze(), chi_batch.squeeze() * 0) + MSE(1-chi_batch.squeeze(), (1-chi_batch.squeeze()) * 0)  
 
             # loss_pinn = pt.mean(residual**2)
             loss_pinn = MSE(residual, pt.zeros_like(residual))
 
-            loss = loss_pinn + lam_bound * reg_loss
+            loss = loss_pinn 
+            # + lam_bound * reg_loss
 
             loss.backward()
             # pt.nn.utils.clip_grad_norm_(model.parameters(), 1.0)

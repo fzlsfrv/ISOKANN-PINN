@@ -7,7 +7,15 @@ from src.useful_functions import*
 import numpy as np
 
 
-
+from openff.toolkit.topology import Molecule
+from openff.toolkit.utils import get_data_file_path
+from openmmforcefields.generators import GAFFTemplateGenerator
+from sys import stdout
+import mdtraj.reporters
+import numpy as np
+from time import gmtime, strftime
+import copy
+import os
 
 
 
@@ -18,19 +26,37 @@ def setup_system(
                     from_pdb=False,
                     pdb_file=None,
                     psf_file=None,
-                    crd_file=None  
+                    crd_file=None,
+                    smiles=None  
                 ):
 
     if from_pdb:
 
         pdb = PDBFile(os.path.join(base, pdb_file))
-        forcefield = ForceField('amber14-all.xml', 'amber14/tip3p.xml')
+        forcefield = ForceField("amber14/protein.ff14SB.xml", "amber14/tip3pfb.xml")
+
+
+        if smiles is not None:
+            os.environ["PATH"] = "/scratch/htc/fsafarov/openmm_ff/bin:" + os.environ["PATH"]
+            print("smiles = ", smiles)
+
+            # generate topology object from smiles info
+            molecule = Molecule.from_smiles(smiles)
+
+            #assign partial charges for electrostatic interactions in the forcefield
+            molecule.assign_partial_charges("gasteiger")
+            gaff_template = GAFFTemplateGenerator(molecules=[molecule], forcefield='gaff-2.2.20')
+            
+            #attach the ligand forcefield template to the general forcefield object
+            forcefield.registerTemplateGenerator(gaff_template.generator)
 
         system = forcefield.createSystem(pdb.topology, 
                                          nonbondedMethod = PME, 
                                          nonbondedCutoff = nbcutoff*nanometer,
                                          constraints = HBonds,
                                          )
+        
+
 
         return system
 
@@ -207,12 +233,19 @@ def get_parameters(
     
 
 def select(
-            psf,
+            inp_dir=None,
+            pdb_file=None,
+            psf=None,
             selection=None,
             ):
+    if psf is not None:
+            
+        md_top = md.Topology.from_openmm(psf.topology)
+        indices = md_top.select(selection)
         
-    md_top = md.Topology.from_openmm(psf.topology)
-    indices = md_top.select(selection)
+    else:
+        md_top = md.load(os.path.join(inp_dir, pdb_file)).topology
+        indices = md_top.select(selection)
 
     return indices
 

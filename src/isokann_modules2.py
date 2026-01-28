@@ -134,7 +134,30 @@ def laplacian_operator(model, x, h):
     return lap_chi
 
 
+
+
+
+# # numerical differentiation PDE (n-pde)
+# # dx & dy get from input
+# xE, xW = x + dx, x - dx
+# yN, yS = y + dy, y - dy
+# uvpE  = nn(tf.stack([xE, y, dx, dy], 1))
+# uvpW  = nn(tf.stack([xW, y, dx, dy], 1))
+# uvpN  = nn(tf.stack([x, yN, dx, dy], 1))
+# uvpS  = nn(tf.stack([x, yS, dx, dy], 1))
+# uE, vE, pE  = tf.split(uvpE, num_or_size_splits=3, axis=1)
+# uW, vW, pW  = tf.split(uvpW, num_or_size_splits=3, axis=1)
+# uN, vN, pN  = tf.split(uvpN, num_or_size_splits=3, axis=1)
+# uS, vS, pS  = tf.split(uvpS, num_or_size_splits=3, axis=1)
+
+#     # can 2nd central difference    
+# pe_ccd2 = (p + pE) /2.0 - (pE_x - p_x)*dx /8.0
+# pw_ccd2 = (pW + p) /2.0 - (p_x - pW_x)*dx /8.0
+# pn_ccd2 = (p + pN) /2.0 - (pN_y - p_y)*dy /8.0
+# ps_ccd2 = (pS + p) /2.0 - (p_y - pS_y)*dy /8.0
     
+# Px_ccd2 = (pe_ccd2 - pw_ccd2) /dx
+# Py_ccd2 = (pn_ccd2 - ps_ccd2) /dy  
 
 
 
