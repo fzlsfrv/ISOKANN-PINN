@@ -40,6 +40,8 @@ class MLP(pt.nn.Module):
             self.activation  = pt.nn.GELU()
         elif act_fun == 'tanh':
             self.activation = pt.nn.Tanh()
+        elif act_fun == 'softplus':
+            self.activation = pt.nn.Softplus()
 
             
         layers = []

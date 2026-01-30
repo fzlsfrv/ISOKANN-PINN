@@ -37,6 +37,10 @@ class MLP(pt.nn.Module):
             self.activation  = pt.nn.LeakyReLU(LeakyReLU_par)
         elif act_fun == 'gelu': 
             self.activation  = pt.nn.GELU()
+        elif act_fun == 'tanh':
+            self.activation = pt.nn.Tanh()
+        elif act_fun == 'softplus':
+            self.activation = pt.nn.Softplus()
 
             
         layers = []
@@ -115,66 +119,44 @@ def nabla_chi(model, x):
         grads.append(gi)
 
     G = pt.stack(grads, dim=2)  # (B,inp_dim, m)
-    return G
+    return chi, G
 
 
 
 
 
-def laplacian_operator(model, x, h):
+def laplacian_operator(model, x, h_val):
     
-    h = pt.zeros_like(x) + 1e-3
+    h = pt.zeros_like(x) + h_val
 
     chi_n = model(x)
+    # print(chi_n.shape)
     chi_plus = model(x + h)
+    # print(chi_plus.shape)
     chi_minus = model(x - h)
 
-    lap_chi = (chi_minus + chi_plus - 2*chi_n)/h**2
+    lap_chi = (chi_minus + chi_plus - 2*chi_n)/h_val**2
+    
 
     return lap_chi
 
 
 
 
-
-# # numerical differentiation PDE (n-pde)
-# # dx & dy get from input
-# xE, xW = x + dx, x - dx
-# yN, yS = y + dy, y - dy
-# uvpE  = nn(tf.stack([xE, y, dx, dy], 1))
-# uvpW  = nn(tf.stack([xW, y, dx, dy], 1))
-# uvpN  = nn(tf.stack([x, yN, dx, dy], 1))
-# uvpS  = nn(tf.stack([x, yS, dx, dy], 1))
-# uE, vE, pE  = tf.split(uvpE, num_or_size_splits=3, axis=1)
-# uW, vW, pW  = tf.split(uvpW, num_or_size_splits=3, axis=1)
-# uN, vN, pN  = tf.split(uvpN, num_or_size_splits=3, axis=1)
-# uS, vS, pS  = tf.split(uvpS, num_or_size_splits=3, axis=1)
-
-#     # can 2nd central difference    
-# pe_ccd2 = (p + pE) /2.0 - (pE_x - p_x)*dx /8.0
-# pw_ccd2 = (pW + p) /2.0 - (p_x - pW_x)*dx /8.0
-# pn_ccd2 = (p + pN) /2.0 - (pN_y - p_y)*dy /8.0
-# ps_ccd2 = (pS + p) /2.0 - (p_y - pS_y)*dy /8.0
-    
-# Px_ccd2 = (pe_ccd2 - pw_ccd2) /dx
-# Py_ccd2 = (pn_ccd2 - ps_ccd2) /dy  
-
-
-
-
-def generator_action(model, x, forces_fn, D):  
+def generator_action(model, x, forces_fn, D, h):  
    
-    grad_chi = nabla_chi(model, x)
+    chi, grad_chi = nabla_chi(model, x)
     # print(f"Gradient shape: {grad_chi.shape}")
     # print(f"Chi function shape {chi.shape}")
 
     # None -> model, 0 -> batch dimensions of chi
-    lap_chi = vmap(laplacian_operator, in_dims=(None, 0))(model, x)  # vmap over batch
+    lap_chi = vmap(laplacian_operator, in_dims=(None, 0, None))(model, x, h)  # vmap over batch
+    lap_chi = lap_chi.sum(dim=0)
+    # print(lap_chi)
 
 
     # print(f"Laplacian chi shape: {lap_chi.shape}")
     return chi, (-0.4*forces_fn * grad_chi.squeeze(-1)).sum(dim=1) + D * lap_chi 
-
 
 
 
@@ -221,13 +203,14 @@ def trainNN(
 
             xb = xb.to(device).float().requires_grad_(True)
 
-            chi_batch, L_chi = generator_action(model, xb, fb, D)
+            chi_batch, L_chi = generator_action(model, xb, fb, D, h=1e-1)
 
             residual = L_chi + model.c1 * chi_batch.squeeze() - model.c2 * (1 - chi_batch.squeeze())  # (B,)
-            reg_loss = MSE(chi_batch.squeeze(), chi_batch.squeeze() * 0) + MSE(1-chi_batch.squeeze(), (1-chi_batch.squeeze()) * 0)  
+            # reg_loss = MSE(chi_batch.squeeze(), chi_batch.squeeze() * 0) + MSE(1-chi_batch.squeeze(), (1-chi_batch.squeeze()) * 0)  
 
             loss_pinn = pt.mean(residual**2)
-            loss = loss_pinn + lam_bound * reg_loss
+            loss = loss_pinn 
+            # + lam_bound * reg_loss
 
             loss.backward()
             # pt.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
