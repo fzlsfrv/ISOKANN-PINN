@@ -125,37 +125,39 @@ def nabla_chi(model, x):
 
 
 
-# def laplacian_chi(grad_chi, x):
+def laplacian_operator(grad_chi, chi, x):
+
+    m = grad_chi.shape[-1]
     
-#     grad_chi.unsqueeze(-1)
-#     m = chi.shape[1]
-#     D = x.shape[1]
+    laplacians=[]
 
-#     laplacians = []
 
-#     for i in range(m):
+    for i in range(m):
 
-#         gi = torch.autograd.grad(
-#             outputs=grad_chi[:,i].sum(),
-#             inputs=x,
-#             create_graph=True,
-#             retain_graph=True
-#         )[0]
-#         laplacians.append(gi)
+        gi = pt.autograd.grad(
+                outputs=grad_chi[:, :, i], 
+                inputs=x,
+                grad_outputs=pt.ones_like(grad_chi[:, :, i]),
+                create_graph=True,
+                retain_graph=True
+            )[0]
+            
+        laplacians.append(gi)
+
     
-#     L = torch.stack(laplacians, dim=1)
+    Delta = gi.sum(dim=-1)
 
-#     return L
-
-
+    return Delta
 
 
-def laplacian_operator(model, x):
 
-    H = hessian(model)(x)
-    H = H.squeeze(0)
-    # print(H.shape)
-    return pt.trace(H)
+
+# def laplacian_operator(model, x):
+
+#     H = hessian(model)(x)
+#     H = H.squeeze(0)
+#     # print(H.shape)
+#     return pt.trace(H)
 
 
 
@@ -173,19 +175,13 @@ def laplacian_operator(model, x):
 
 
 
-
-
-
-
-
 def generator_action(model, x, forces_fn, D):  
    
     chi, grad_chi = nabla_chi(model, x)
     # print(f"Gradient shape: {grad_chi.shape}")
     # print(f"Chi function shape {chi.shape}")
 
-    # None -> model, 0 -> batch dimensions of chi
-    lap_chi = vmap(laplacian_operator, in_dims=(None, 0))(model, x)  # vmap over batch
+    lap_chi = laplacian_operator(grad_chi, chi, x) 
 
     # print(f"Laplacian chi shape: {lap_chi.shape}")
     return chi, (-0.4*forces_fn * grad_chi.squeeze(-1)).sum(dim=1) + D * lap_chi 
