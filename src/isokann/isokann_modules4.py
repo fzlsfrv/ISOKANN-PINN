@@ -71,8 +71,8 @@ class ratesNN(nn.Module):
         super().__init__()
         self.net = mlp_network
 
-        self.c1_ = nn.Parameter(pt.tensor(-2.0))
-        self.c2_ = nn.Parameter(pt.tensor(-2.0))
+        self.c1_ = nn.Parameter(pt.tensor(0.5))
+        self.c2_ = nn.Parameter(pt.tensor(0.5))
 
         self.softplus = nn.Softplus()
 
@@ -175,7 +175,7 @@ def laplacian_operator(grad_chi, chi, x):
 
 
 
-def generator_action(model, x, forces_fn, gamma, k_B, T, S):  
+def generator_action(model, x, forces_fn, gamma, k_B, T, S=1):  
    
     chi, grad_chi = nabla_chi(model, x)
     # print(f"Gradient shape: {grad_chi.shape}")
@@ -223,11 +223,15 @@ def trainNN(
 
 
 
-    max_force = pt.max(forces_fn.abs())
-    S = (max_force / gamma).item()
+    # max_force = pt.max(forces_fn.abs())
+    mean_force_mag = pt.abs(forces_fn).mean().item()
+    S = (mean_force_mag / gamma)
 
     train_ds = TensorDataset(coords, forces_fn)
     loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
+
+    c1_vals = []
+    c2_vals = []
 
 
     for epoch in range(Nepochs+1):
@@ -243,6 +247,12 @@ def trainNN(
 
             xb = xb.to(device).float().requires_grad_(True)
 
+            # mean_force = fb.mean()
+            # S = (mean_force / gamma).item()
+
+            # S = 1
+
+            
             chi_batch, L_chi = generator_action(model, xb, fb, gamma, k_B, T, S)
 
 

@@ -10,58 +10,10 @@ import sys
 
 import torch.nn as nn
 from torch.utils.data import TensorDataset, DataLoader
-from torch.func import hessian, vmap
+from torch.func import vmap, hessian
+# from torch.autograd.functional import hessian
 
 device = pt.device("cuda" if pt.cuda.is_available() else "cpu")
-
-
-class MLP(pt.nn.Module):
-
-    def __init__(self, Nodes, enforce_positive=0, act_fun='sigmoid', LeakyReLU_par=0.01):
-
-        super(MLP, self).__init__()
-
-        self.input_size    = Nodes[0]
-        self.output_size   = Nodes[-1]
-        self.Nhiddenlayers = len(Nodes)-2
-        self.Nodes         = Nodes
-
-        dims_in = Nodes[:-1]
-        dims_out = Nodes[1:]
-
-        if act_fun == 'sigmoid':
-            self.activation  = pt.nn.Sigmoid()  # #
-        elif act_fun == 'relu':
-            self.activation  = pt.nn.ReLU()
-        elif act_fun == 'leakyrelu': 
-            self.activation  = pt.nn.LeakyReLU(LeakyReLU_par)
-        elif act_fun == 'gelu': 
-            self.activation  = pt.nn.GELU()
-        elif act_fun == 'tanh':
-            self.activation = pt.nn.Tanh()
-        elif act_fun == 'softplus':
-            self.activation = pt.nn.Softplus()
-
-            
-        layers = []
-
-        for i, (dim_in, dim_out) in enumerate(zip(dims_in, dims_out)):
-            layers.append(pt.nn.Linear(dim_in, dim_out))
-
-            if i < self.Nhiddenlayers:
-                layers.append(self.activation)
-
-        self._layers = pt.nn.Sequential(*layers)
-    
-
-    def forward(self, x):
-        """
-            MLP forward pass
-        """
-        return self._layers(x)
-
-
-
 
 
 class ratesNN(nn.Module):
@@ -70,8 +22,8 @@ class ratesNN(nn.Module):
         super().__init__()
         self.net = mlp_network
 
-        self.c1_ = nn.Parameter(pt.tensor(-2.0))
-        self.c2_ = nn.Parameter(pt.tensor(-2.0))
+        self.c1_ = nn.Parameter(pt.tensor(0.5))
+        self.c2_ = nn.Parameter(pt.tensor(0.5))
 
         self.softplus = nn.Softplus()
 
@@ -88,24 +40,24 @@ class ratesNN(nn.Module):
         return self.softplus(self.c2_)
 
     
-    def forward(self, x):
+    def forward(self, x, z):
 
-        return self.net(x)
+        return self.net(x, z)
 
         
 
 
 
-def nabla_chi(model, x):
+def nabla_chi(model, x, z):
     """
     Returns d chi / d x.
-    x:   (B,1) with requires_grad=True
-    chi: (B,m)
-    out: (B,m,1)  (Jacobian per sample)
     """
     x = x.requires_grad_(True)
     
-    chi = model(x)
+    chi = model(
+        z.reshape(-1).long(),
+        x.reshape(-1, 3)
+    )
 
     grads = []
     m = chi.shape[1]
@@ -124,35 +76,63 @@ def nabla_chi(model, x):
 
 
 
+def laplacian_operator(grad_chi, chi, x):
 
-def laplacian_operator(model, x, h_val):
+    m = grad_chi.shape[-1]
     
-    h = pt.zeros_like(x) + h_val
+    laplacians=[]
 
-    chi_n = model(x)
-    # print(chi_n.shape)
-    chi_plus = model(x + h)
-    # print(chi_plus.shape)
-    chi_minus = model(x - h)
 
-    lap_chi = (chi_minus + chi_plus - 2*chi_n)/h_val**2
+    for i in range(m):
+
+        gi = pt.autograd.grad(
+                outputs=grad_chi[:, :, i], 
+                inputs=x,
+                grad_outputs=pt.ones_like(grad_chi[:, :, i]),
+                create_graph=True,
+                retain_graph=True
+            )[0]
+            
+        laplacians.append(gi)
+
     
+    Delta = gi.sum(dim=-1)
 
-    return lap_chi
+    return Delta
 
 
 
 
-def generator_action(model, x, forces_fn, gamma, k_B, T, S=1, h_val=1e-3):  
+# def laplacian_operator(model, x):
+
+#     H = hessian(model)(x)
+#     H = H.squeeze(0)
+#     # print(H.shape)
+#     return pt.trace(H)
+
+
+
+# def laplacian_operator(model, x):
+#     x_vec = x.squeeze(0).squeeze(-1) if x.dim() > 1 else x.squeeze(-1)  
+    
+#     def scalar_fn(inputs):
+#         out = model(inputs.unsqueeze(0))  
+#         return out.squeeze(-1)
+    
+#     H = hessian(scalar_fn, x_vec, create_graph=True) 
+#     print(H.shape)  
+#     return pt.trace(H)
+
+
+
+
+def generator_action(model, x, z, forces_fn, gamma, k_B, T, S=1):  
    
-    chi, grad_chi = nabla_chi(model, x)
+    chi, grad_chi = nabla_chi(model, x, z)
     # print(f"Gradient shape: {grad_chi.shape}")
     # print(f"Chi function shape {chi.shape}")
 
-    # None -> model, 0 -> batch dimensions of chi
-    lap_chi = vmap(laplacian_operator, in_dims=(None, 0, None))(model, x, h_val)  # vmap over batch
-    lap_chi = lap_chi.sum(dim=0)
-    # print(lap_chi)
+    lap_chi = laplacian_operator(grad_chi, chi, x)
 
     drift_term = (-(1.0 / (gamma * S)) * forces_fn * grad_chi.squeeze(-1)).sum(dim=1)
 
@@ -165,12 +145,22 @@ def generator_action(model, x, forces_fn, gamma, k_B, T, S=1, h_val=1e-3):
 
 
 
+def scale_and_shift(y):
+    minarr = pt.min(y)
+    maxarr = pt.max(y)
+    hat_y =  (y - minarr) / (maxarr - minarr)
+
+    return hat_y
+
+
+
 def trainNN(
             model,
             Nepochs,
             batch_size,
             coords,
             forces_fn,
+            atomic_numbers,
             optimizer, 
             lam_bound,
             split=0.2,
@@ -179,8 +169,7 @@ def trainNN(
             device=None, 
             T=310.15,
             gamma=1000.0,
-            k_B=0.008314,
-            h_val=1e-3
+            k_B=0.008314
             ):
 
     
@@ -197,7 +186,7 @@ def trainNN(
     mean_force_mag = pt.abs(forces_fn).mean().item()
     S = (mean_force_mag / gamma)
 
-    train_ds = TensorDataset(coords, forces_fn)
+    train_ds = TensorDataset(coords, forces_fn, atomic_numbers)
     loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
 
     c1_vals = []
@@ -210,7 +199,7 @@ def trainNN(
         epoch_loss = 0
         # permutation = pt.randperm(X_train.size()[0], device=device)
         
-        for xb, fb in loader:
+        for xb, fb, zb in loader:
 
             # Clear gradients for next training
             optimizer.zero_grad()
@@ -223,7 +212,7 @@ def trainNN(
             # S = 1
 
             
-            chi_batch, L_chi = generator_action(model, xb, fb, gamma, k_B, T, S, h_val)
+            chi_batch, L_chi = generator_action(model, xb, zb, fb, gamma, k_B, T, S)
 
 
             c1_s = model.c1/S
@@ -253,7 +242,6 @@ def trainNN(
             c2_vals.append(model.c2.item())
         
     return c1_vals, c2_vals
-
 
              
 
