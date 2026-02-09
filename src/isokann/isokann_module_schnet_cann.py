@@ -16,55 +16,6 @@ from torch.func import vmap, hessian
 device = pt.device("cuda" if pt.cuda.is_available() else "cpu")
 
 
-class MLP(pt.nn.Module):
-
-    def __init__(self, Nodes, enforce_positive=0, act_fun='sigmoid', LeakyReLU_par=0.01):
-
-        super(MLP, self).__init__()
-
-        self.input_size    = Nodes[0]
-        self.output_size   = Nodes[-1]
-        self.Nhiddenlayers = len(Nodes)-2
-        self.Nodes         = Nodes
-
-        dims_in = Nodes[:-1]
-        dims_out = Nodes[1:]
-
-        if act_fun == 'sigmoid':
-            self.activation  = pt.nn.Sigmoid()  # #
-        elif act_fun == 'relu':
-            self.activation  = pt.nn.ReLU()
-        elif act_fun == 'leakyrelu': 
-            self.activation  = pt.nn.LeakyReLU(LeakyReLU_par)
-        elif act_fun == 'gelu': 
-            self.activation  = pt.nn.GELU()
-        elif act_fun == 'tanh':
-            self.activation = pt.nn.Tanh()
-        elif act_fun == 'softplus':
-            self.activation = pt.nn.Softplus()
-
-            
-        layers = []
-
-        for i, (dim_in, dim_out) in enumerate(zip(dims_in, dims_out)):
-            layers.append(pt.nn.Linear(dim_in, dim_out))
-
-            if i < self.Nhiddenlayers:
-                layers.append(self.activation)
-
-        self._layers = pt.nn.Sequential(*layers)
-    
-
-    def forward(self, x):
-        """
-            MLP forward pass
-        """
-        return self._layers(x)
-
-
-
-
-
 class ratesNN(nn.Module):
     def __init__(self, mlp_network):
 
@@ -89,24 +40,27 @@ class ratesNN(nn.Module):
         return self.softplus(self.c2_)
 
     
-    def forward(self, x):
+    def forward(self, z, x, batch_dimensions):
 
-        return self.net(x)
+        return self.net(z, x, batch_dimensions)
 
         
 
 
 
-def nabla_chi(model, x):
+def nabla_chi(model, x, z, batch_dims):
     """
     Returns d chi / d x.
-    x:   (B,1) with requires_grad=True
-    chi: (B,m)
-    out: (B,m,1)  (Jacobian per sample)
     """
     x = x.requires_grad_(True)
     
-    chi = model(x)
+    chi = model(
+        z.view(-1).long(),
+        x.view(-1, 3),
+        batch_dims
+    )
+
+    # x = x.reshape(x.shape[0], -1)
 
     grads = []
     m = chi.shape[1]
@@ -119,36 +73,40 @@ def nabla_chi(model, x):
         )[0]  # (B,inp_dim)
         grads.append(gi)
 
-    G = pt.stack(grads, dim=2)  # (B,inp_dim, m)
+    G = pt.stack(grads, dim=-1)  # (B,inp_dim, m)
+    G = G.reshape(G.shape[0], -1)
+
     return chi, G
 
 
 
-
-def laplacian_operator(grad_chi, chi, x):
-
-    m = grad_chi.shape[-1]
+def laplacian_operator(model, x, z, h_val, batch_dims):
     
+    h = pt.zeros_like(x) + h_val
+
+    chi_n = model(
+        z.view(-1).long(),
+        x.view(-1, 3),
+        batch_dims
+    )
+    # print(chi_n.shape)
+    chi_plus = model(
+        z.view(-1).long(),
+        (x+h).view(-1, 3),
+        batch_dims
+    )
+    # print(chi_plus.shape)
+    chi_minus = model(
+        z.view(-1).long(),
+        (x-h).view(-1, 3),
+        batch_dims
+    )
+
+    lap_chi = (chi_minus + chi_plus - 2*chi_n)/h_val**2
     
-    # print(f"Gradient shape: {grad_chi.shape}")
 
-    for i in range(m):
+    return lap_chi
 
-        gi = pt.autograd.grad(
-                outputs=grad_chi[:, :, i], 
-                inputs=x,
-                grad_outputs=pt.ones_like(grad_chi[:, :, i]),
-                create_graph=True,
-                retain_graph=True
-            )[0]
-            
-    
-    # print(f"gi shape {gi.shape}")
-
-    
-    Delta = gi.sum(dim=-1)
-
-    return Delta
 
 
 
@@ -174,18 +132,26 @@ def laplacian_operator(grad_chi, chi, x):
 #     return pt.trace(H)
 
 
+def get_batch_dimensions(batch_size, n_particles):
+    return pt.repeat_interleave(pt.arange(batch_size), n_particles)
 
 
-def generator_action(model, x, forces_fn, gamma, k_B, T, S=1):  
+
+def generator_action(model, x, z, forces_fn, gamma, k_B, T, batch_dimensions, S=1, h_val=1e-3):  
    
-    chi, grad_chi = nabla_chi(model, x)
+    chi, grad_chi = nabla_chi(model, x, z, batch_dimensions)
+    forces_fn = forces_fn.reshape(forces_fn.shape[0], -1)
     # print(f"Gradient shape: {grad_chi.shape}")
     # print(f"Chi function shape {chi.shape}")
 
-    lap_chi = laplacian_operator(grad_chi, chi, x)
-    
+    lap_chi = laplacian_operator(model, x, z, h_val, batch_dimensions)
+    # print(f"chi shape {chi.shape}")
+    # print(f"laplacian chi shape {lap_chi.shape}")
+    # print(f"grad chi shape: {grad_chi.squeeze(-1).shape}")
+    # print(f"forces_fn shape: {forces_fn.shape}")
 
     drift_term = (-(1.0 / (gamma * S)) * forces_fn * grad_chi.squeeze(-1)).sum(dim=-1)
+    # print(drift_term.shape)
 
     diffusion_term = (k_B * T / (gamma * S)) * lap_chi
 
@@ -196,6 +162,13 @@ def generator_action(model, x, forces_fn, gamma, k_B, T, S=1):
 
 
 
+def scale_and_shift(y):
+    minarr = pt.min(y)
+    maxarr = pt.max(y)
+    hat_y =  (y - minarr) / (maxarr - minarr)
+
+    return hat_y
+
 
 
 def trainNN(
@@ -204,6 +177,7 @@ def trainNN(
             batch_size,
             coords,
             forces_fn,
+            atomic_numbers,
             optimizer, 
             lam_bound,
             split=0.2,
@@ -226,11 +200,15 @@ def trainNN(
 
 
     # max_force = pt.max(forces_fn.abs())
+    n_particles = coords.shape[-2]
+    batch_dims = get_batch_dimensions(batch_size, n_particles).to(device)
+
+
     mean_force_mag = pt.abs(forces_fn).mean().item()
     S = (mean_force_mag / gamma)
 
-    train_ds = TensorDataset(coords, forces_fn)
-    loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
+    train_ds = TensorDataset(coords, forces_fn, atomic_numbers)
+    loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, drop_last=True)
 
     c1_vals = []
     c2_vals = []
@@ -242,7 +220,7 @@ def trainNN(
         epoch_loss = 0
         # permutation = pt.randperm(X_train.size()[0], device=device)
         
-        for xb, fb in loader:
+        for xb, fb, zb in loader:
 
             # Clear gradients for next training
             optimizer.zero_grad()
@@ -255,7 +233,8 @@ def trainNN(
             # S = 1
 
             
-            chi_batch, L_chi = generator_action(model, xb, fb, gamma, k_B, T, S)
+            
+            chi_batch, L_chi = generator_action(model, xb, zb, fb, gamma, k_B, T, batch_dims, S)
 
 
             c1_s = model.c1/S

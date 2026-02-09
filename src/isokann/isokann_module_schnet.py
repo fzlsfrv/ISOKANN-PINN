@@ -26,6 +26,9 @@ class ratesNN(nn.Module):
         self.c2_ = nn.Parameter(pt.tensor(0.5))
 
         self.softplus = nn.Softplus()
+        self.sigmoid = nn.Sigmoid()
+
+        self.norm = nn.BatchNorm1d(1)
 
     
     @property
@@ -40,24 +43,49 @@ class ratesNN(nn.Module):
         return self.softplus(self.c2_)
 
     
-    def forward(self, x, z):
+    def forward(self, z, x, batch_dimensions):
 
-        return self.net(x, z)
+        logits = self.net(z, x, batch_dimensions)
+        mean_ = logits.mean()
+        std_ = logits.std()
+
+        logits_zscore = (logits - mean_) / (std_ + 1e-8)
+
+        return self.sigmoid(logits_zscore)
+        # return logits
+        # return self.net(z, x, batch_dimensions)
+
+
 
         
 
 
 
-def nabla_chi(model, x, z):
+def nabla_chi(model, x, z, batch_dims):
     """
     Returns d chi / d x.
     """
     x = x.requires_grad_(True)
-    
+
     chi = model(
-        z.reshape(-1).long(),
-        x.reshape(-1, 3)
+        z.view(-1).long(),
+        x.view(-1, 3),
+        batch_dims
     )
+    
+    # chi = scale_and_shift(model(
+    #     z.view(-1).long(),
+    #     x.view(-1, 3),
+    #     batch_dims
+    # ))
+
+    # chi = pt.sigmoid(model(
+    #     z.view(-1).long(),
+    #     x.view(-1, 3),
+    #     batch_dims
+    # ))
+
+    # x = x.reshape(x.shape[0], -1)
 
     grads = []
     m = chi.shape[1]
@@ -70,7 +98,9 @@ def nabla_chi(model, x, z):
         )[0]  # (B,inp_dim)
         grads.append(gi)
 
-    G = pt.stack(grads, dim=2)  # (B,inp_dim, m)
+    G = pt.stack(grads, dim=-1).squeeze(-1)  # (B,inp_dim, dim_coords)
+    # G = G.reshape(G.shape[0], -1)
+
     return chi, G
 
 
@@ -78,25 +108,17 @@ def nabla_chi(model, x, z):
 
 def laplacian_operator(grad_chi, chi, x):
 
-    m = grad_chi.shape[-1]
-    
-    laplacians=[]
-
-
-    for i in range(m):
-
-        gi = pt.autograd.grad(
-                outputs=grad_chi[:, :, i], 
+    # print(f"Gradient shape: {grad_chi.shape}")
+    gi = pt.autograd.grad(
+                outputs=grad_chi, 
                 inputs=x,
-                grad_outputs=pt.ones_like(grad_chi[:, :, i]),
+                grad_outputs=pt.ones_like(grad_chi),
                 create_graph=True,
                 retain_graph=True
             )[0]
-            
-        laplacians.append(gi)
 
-    
-    Delta = gi.sum(dim=-1)
+    # print(f"gi shape {gi.shape}")
+    Delta = gi.sum(dim=-1).sum(dim=-1)
 
     return Delta
 
@@ -124,22 +146,39 @@ def laplacian_operator(grad_chi, chi, x):
 #     return pt.trace(H)
 
 
+def get_batch_dimensions(batch_size, n_particles):
+    return pt.repeat_interleave(pt.arange(batch_size), n_particles)
 
 
-def generator_action(model, x, z, forces_fn, gamma, k_B, T, S=1):  
+
+def generator_action(model, x, z, forces_fn, gamma, k_B, T, batch_dimensions, S=1):  
    
-    chi, grad_chi = nabla_chi(model, x, z)
+    chi, grad_chi = nabla_chi(model, x, z, batch_dimensions)
+    # forces_fn = forces_fn.reshape(forces_fn.shape[0], -1)
     # print(f"Gradient shape: {grad_chi.shape}")
     # print(f"Chi function shape {chi.shape}")
 
-    lap_chi = laplacian_operator(grad_chi, chi, x)
 
-    drift_term = (-(1.0 / (gamma * S)) * forces_fn * grad_chi.squeeze(-1)).sum(dim=1)
+
+    if grad_chi.abs().max() < 1e-9:
+        print("WARNING: grad_chi is effectively zero. Sigmoid is still saturated.")
+    
+    lap_chi = laplacian_operator(grad_chi, chi, x)
+    # print(f"chi shape {chi.shape}")
+    # print(f"laplacian chi shape {lap_chi.shape}")
+    # print(f"grad chi shape: {grad_chi.squeeze(-1).shape}")
+    # print(f"forces_fn shape: {forces_fn.shape}")
+
+    drift_term = (-(1.0 / (gamma * S)) * forces_fn * grad_chi).sum(dim=-1).sum(dim=-1)
+    # print(f"drift term mean: {drift_term.mean()}")
+    # print(f"drift term: {drift_term}")
 
     diffusion_term = (k_B * T / (gamma * S)) * lap_chi
+    # print(f"diffusion term mean: {diffusion_term.mean()}")
+    # print(f"diffusion term: {diffusion_term}")
 
     L_scaled = drift_term + diffusion_term
-
+    # print(f"L_scaled: {L_scaled}")
     # print(f"Laplacian chi shape: {lap_chi.shape}")
     return chi, L_scaled
 
@@ -148,7 +187,7 @@ def generator_action(model, x, z, forces_fn, gamma, k_B, T, S=1):
 def scale_and_shift(y):
     minarr = pt.min(y)
     maxarr = pt.max(y)
-    hat_y =  (y - minarr) / (maxarr - minarr)
+    hat_y =  (y - minarr) / (maxarr - minarr + 1e-8)
 
     return hat_y
 
@@ -183,11 +222,15 @@ def trainNN(
 
 
     # max_force = pt.max(forces_fn.abs())
+    n_particles = coords.shape[-2]
+    batch_dims = get_batch_dimensions(batch_size, n_particles).to(device)
+
+
     mean_force_mag = pt.abs(forces_fn).mean().item()
     S = (mean_force_mag / gamma)
 
     train_ds = TensorDataset(coords, forces_fn, atomic_numbers)
-    loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
+    loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, drop_last=True)
 
     c1_vals = []
     c2_vals = []
@@ -212,7 +255,10 @@ def trainNN(
             # S = 1
 
             
-            chi_batch, L_chi = generator_action(model, xb, zb, fb, gamma, k_B, T, S)
+            
+            chi_batch, L_chi = generator_action(model, xb, zb, fb, gamma, k_B, T, batch_dims, S)
+
+            
 
 
             c1_s = model.c1/S

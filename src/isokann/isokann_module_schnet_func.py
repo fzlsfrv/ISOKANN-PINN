@@ -16,54 +16,6 @@ from torch.func import vmap, hessian
 device = pt.device("cuda" if pt.cuda.is_available() else "cpu")
 
 
-class MLP(pt.nn.Module):
-
-    def __init__(self, Nodes, enforce_positive=0, act_fun='sigmoid', LeakyReLU_par=0.01):
-
-        super(MLP, self).__init__()
-
-        self.input_size    = Nodes[0]
-        self.output_size   = Nodes[-1]
-        self.Nhiddenlayers = len(Nodes)-2
-        self.Nodes         = Nodes
-
-        dims_in = Nodes[:-1]
-        dims_out = Nodes[1:]
-
-        if act_fun == 'sigmoid':
-            self.activation  = pt.nn.Sigmoid()  # #
-        elif act_fun == 'relu':
-            self.activation  = pt.nn.ReLU()
-        elif act_fun == 'leakyrelu': 
-            self.activation  = pt.nn.LeakyReLU(LeakyReLU_par)
-        elif act_fun == 'gelu': 
-            self.activation  = pt.nn.GELU()
-        elif act_fun == 'tanh':
-            self.activation = pt.nn.Tanh()
-        elif act_fun == 'softplus':
-            self.activation = pt.nn.Softplus()
-
-            
-        layers = []
-
-        for i, (dim_in, dim_out) in enumerate(zip(dims_in, dims_out)):
-            layers.append(pt.nn.Linear(dim_in, dim_out))
-
-            if i < self.Nhiddenlayers:
-                layers.append(self.activation)
-
-        self._layers = pt.nn.Sequential(*layers)
-    
-
-    def forward(self, x):
-        """
-            MLP forward pass
-        """
-        return self._layers(x)
-
-
-
-
 
 class ratesNN(nn.Module):
     def __init__(self, mlp_network):
@@ -89,24 +41,26 @@ class ratesNN(nn.Module):
         return self.softplus(self.c2_)
 
     
-    def forward(self, x):
+    def forward(self, z, x, batch_dimensions):
 
-        return self.net(x)
-
+        return self.net(z, x, batch_dimensions)
         
 
 
 
-def nabla_chi(model, x):
+def nabla_chi(model, x, z, batch_dims):
     """
     Returns d chi / d x.
-    x:   (B,1) with requires_grad=True
-    chi: (B,m)
-    out: (B,m,1)  (Jacobian per sample)
     """
     x = x.requires_grad_(True)
     
-    chi = model(x)
+    chi = model(
+        z.view(-1).long(),
+        x.view(-1, 3),
+        batch_dims
+    )
+
+    # x = x.reshape(x.shape[0], -1)
 
     grads = []
     m = chi.shape[1]
@@ -119,83 +73,50 @@ def nabla_chi(model, x):
         )[0]  # (B,inp_dim)
         grads.append(gi)
 
-    G = pt.stack(grads, dim=2)  # (B,inp_dim, m)
+    G = pt.stack(grads, dim=-1)  # (B,inp_dim, m)
+    G = G.reshape(G.shape[0], -1)
+
     return chi, G
 
 
 
 
-def laplacian_operator(grad_chi, chi, x):
+def laplacian_operator(model, x, z, batch_dimensions):
 
-    m = grad_chi.shape[-1]
+    N = x.size(0)
+    local_batch = pt.zeros(N, device=x.device, dtype=pt.long)
+
+    H = hessian(model, argnums=1)(z.view(-1).long(), x.view(-1, 3), local_batch)
     
-    
-    # print(f"Gradient shape: {grad_chi.shape}")
-
-    for i in range(m):
-
-        gi = pt.autograd.grad(
-                outputs=grad_chi[:, :, i], 
-                inputs=x,
-                grad_outputs=pt.ones_like(grad_chi[:, :, i]),
-                create_graph=True,
-                retain_graph=True
-            )[0]
-            
-    
-    # print(f"gi shape {gi.shape}")
-
-    
-    Delta = gi.sum(dim=-1)
-
-    return Delta
+    H = H.view(N * 3, N * 3)
+    # print(H.shape)
+    return pt.trace(H)
 
 
 
 
-# def laplacian_operator(model, x):
-
-#     H = hessian(model)(x)
-#     H = H.squeeze(0)
-#     # print(H.shape)
-#     return pt.trace(H)
-
-
-
-# def laplacian_operator(model, x):
-#     x_vec = x.squeeze(0).squeeze(-1) if x.dim() > 1 else x.squeeze(-1)  
-    
-#     def scalar_fn(inputs):
-#         out = model(inputs.unsqueeze(0))  
-#         return out.squeeze(-1)
-    
-#     H = hessian(scalar_fn, x_vec, create_graph=True) 
-#     print(H.shape)  
-#     return pt.trace(H)
+def get_batch_dimensions(batch_size, n_particles):
+    return pt.repeat_interleave(pt.arange(batch_size), n_particles)
 
 
 
 
-def generator_action(model, x, forces_fn, gamma, k_B, T, S=1):  
+def generator_action(model, x, z, forces_fn, gamma, k_B, T, batch_dimensions,S=1):  
    
-    chi, grad_chi = nabla_chi(model, x)
+    chi, grad_chi = nabla_chi(model, x, z, batch_dimensions)
     # print(f"Gradient shape: {grad_chi.shape}")
     # print(f"Chi function shape {chi.shape}")
 
-    lap_chi = laplacian_operator(grad_chi, chi, x)
-    
+    lap_chi = vmap(laplacian_operator, in_dims=(None, 0, 0, None))(model, x, z, batch_dimensions)
 
-    drift_term = (-(1.0 / (gamma * S)) * forces_fn * grad_chi.squeeze(-1)).sum(dim=-1)
+    drift_term = (-(1.0 / (gamma * S)) * forces_fn * grad_chi.squeeze(-1)).sum(dim=1)
 
     diffusion_term = (k_B * T / (gamma * S)) * lap_chi
 
     L_scaled = drift_term + diffusion_term
 
     # print(f"Laplacian chi shape: {lap_chi.shape}")
-    return chi, L_scaled
-
-
-
+    return chi, L_scaled   
 
 
 def trainNN(
@@ -204,6 +125,7 @@ def trainNN(
             batch_size,
             coords,
             forces_fn,
+            atomic_numbers,
             optimizer, 
             lam_bound,
             split=0.2,
@@ -226,10 +148,14 @@ def trainNN(
 
 
     # max_force = pt.max(forces_fn.abs())
+    n_particles = coords.shape[-2]
+    batch_dims = get_batch_dimensions(batch_size, n_particles).to(device)
+
+
     mean_force_mag = pt.abs(forces_fn).mean().item()
     S = (mean_force_mag / gamma)
 
-    train_ds = TensorDataset(coords, forces_fn)
+    train_ds = TensorDataset(coords, forces_fn, atomic_numbers)
     loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
 
     c1_vals = []
@@ -242,7 +168,7 @@ def trainNN(
         epoch_loss = 0
         # permutation = pt.randperm(X_train.size()[0], device=device)
         
-        for xb, fb in loader:
+        for xb, fb, zb in loader:
 
             # Clear gradients for next training
             optimizer.zero_grad()
@@ -255,7 +181,8 @@ def trainNN(
             # S = 1
 
             
-            chi_batch, L_chi = generator_action(model, xb, fb, gamma, k_B, T, S)
+            
+            chi_batch, L_chi = generator_action(model, xb, zb, fb, gamma, k_B, T, batch_dims, S)
 
 
             c1_s = model.c1/S
@@ -285,6 +212,9 @@ def trainNN(
             c2_vals.append(model.c2.item())
         
     return c1_vals, c2_vals
+            
+
+
 
              
 
