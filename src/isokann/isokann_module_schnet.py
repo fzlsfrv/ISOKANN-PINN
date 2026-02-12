@@ -27,6 +27,7 @@ class ratesNN(nn.Module):
 
         self.softplus = nn.Softplus()
         self.sigmoid = nn.Sigmoid()
+        self.tanh = nn.Tanh()
 
         self.norm = nn.BatchNorm1d(1)
 
@@ -51,7 +52,7 @@ class ratesNN(nn.Module):
 
         logits_zscore = (logits - mean_) / (std_ + 1e-8)
 
-        return self.sigmoid(logits_zscore)
+        return self.softplus(logits_zscore)
         # return logits
         # return self.net(z, x, batch_dimensions)
 

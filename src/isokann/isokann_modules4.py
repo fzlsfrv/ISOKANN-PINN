@@ -211,7 +211,7 @@ def trainNN(
             D=1,
             device=None, 
             T=310.15,
-            gamma=1000.0,
+            gamma=1.0,
             k_B=0.008314
             ):
 

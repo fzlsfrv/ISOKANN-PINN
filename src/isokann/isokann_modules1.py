@@ -149,10 +149,11 @@ def nabla_chi(model, x):
 
 
 
-def laplacian_operator(model, x):
+def laplacian_operator(model, masses, x):
 
     H = hessian(model)(x)
     H = H.squeeze(0)
+    H.diagonal().div_(masses)
     # print(H.shape)
     return pt.trace(H)
 
@@ -166,9 +167,9 @@ def generator_action(model, x, forces_fn, masses, gamma, k_B, T, S=1):
     # print(f"Gradient shape: {grad_chi.shape}")
     # print(f"Chi function shape {chi.shape}")
 
-    lap_chi = vmap(laplacian_operator, in_dims=(None, 0))(model, x)
+    lap_chi = vmap(laplacian_operator, in_dims=(None, None, 0))(model, masses, x)
 
-    drift_term = (-(1.0 / (gamma * S)) * forces_fn * grad_chi.squeeze(-1)).sum(dim=1)
+    drift_term = (-(1.0 / (gamma * masses * S)) * forces_fn * grad_chi.squeeze(-1)).sum(dim=1)
 
     diffusion_term = (k_B * T / (gamma * S)) * lap_chi
 

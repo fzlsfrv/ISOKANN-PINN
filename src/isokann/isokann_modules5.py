@@ -124,38 +124,45 @@ def nabla_chi(model, x):
 
 
 
-# def laplacian_chi(grad_chi, x):
+
+def laplacian_operator(grad_chi, chi, masses, x):
+
+    m = grad_chi.shape[-1]
     
-#     grad_chi.unsqueeze(-1)
-#     m = chi.shape[1]
-#     D = x.shape[1]
-
-#     laplacians = []
-
-#     for i in range(m):
-
-#         gi = torch.autograd.grad(
-#             outputs=grad_chi[:,i].sum(),
-#             inputs=x,
-#             create_graph=True,
-#             retain_graph=True
-#         )[0]
-#         laplacians.append(gi)
     
-#     L = torch.stack(laplacians, dim=1)
+    # print(f"Gradient shape: {grad_chi.shape}")
 
-#     return L
+    for i in range(m):
+
+        gi = pt.autograd.grad(
+                outputs=grad_chi[:, :, i], 
+                inputs=x,
+                grad_outputs=pt.ones_like(grad_chi[:, :, i]),
+                create_graph=True,
+                retain_graph=True
+            )[0]
+            
+    
+    # print(f"gi shape {gi.shape}")
+
+    
+    Delta = (gi/masses).sum(dim=-1)
+
+    return Delta
 
 
 
 
-def laplacian_operator(model, x):
-
-    H = hessian(model)(x)
-    H = H.squeeze(0)
-    # print(H.shape)
-    return pt.trace(H)
-
+# def laplacian_operator(model, x):
+#     x_vec = x.squeeze(0).squeeze(-1) if x.dim() > 1 else x.squeeze(-1)  
+    
+#     def scalar_fn(inputs):
+#         out = model(inputs.unsqueeze(0))  
+#         return out.squeeze(-1)
+    
+#     H = hessian(scalar_fn, x_vec, create_graph=True) 
+#     print(H.shape)  
+#     return pt.trace(H)
 
 
 
@@ -166,16 +173,21 @@ def generator_action(model, x, forces_fn, masses, gamma, k_B, T, S=1):
     # print(f"Gradient shape: {grad_chi.shape}")
     # print(f"Chi function shape {chi.shape}")
 
-    lap_chi = vmap(laplacian_operator, in_dims=(None, 0))(model, x)
+    lap_chi = laplacian_operator(grad_chi, chi, masses, x)
+    
+    # print(masses.shape)
 
-    drift_term = (-(1.0 / (gamma * S)) * forces_fn * grad_chi.squeeze(-1)).sum(dim=1)
+    drift_term = (-(1.0 / (gamma * masses * S)) * forces_fn * grad_chi.squeeze(-1)).sum(dim=-1)
 
     diffusion_term = (k_B * T / (gamma * S)) * lap_chi
 
     L_scaled = drift_term + diffusion_term
 
     # print(f"Laplacian chi shape: {lap_chi.shape}")
-    return chi, L_scaled   
+    return chi, L_scaled
+
+
+
 
 
 def trainNN(
@@ -184,7 +196,7 @@ def trainNN(
             batch_size,
             coords,
             forces_fn,
-            masses, 
+            masses,
             optimizer, 
             lam_bound,
             split=0.2,
@@ -192,7 +204,7 @@ def trainNN(
             D=1,
             device=None, 
             T=310.15,
-            gamma=1000.0,
+            gamma=1.0,
             k_B=0.008314
             ):
 
@@ -205,15 +217,13 @@ def trainNN(
     # optimizer = pt.optim.SGD(net.parameters(), lr=lr, weight_decay=wd)
 
 
+
     # max_force = pt.max(forces_fn.abs())
-    # S = (max_force / gamma).item()
-    
+    mean_force_mag = pt.abs(forces_fn).mean().item()
+    S = (mean_force_mag / gamma)
 
     train_ds = TensorDataset(coords, forces_fn)
     loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
-
-    mean_force_mag = pt.abs(forces_fn).mean().item()
-    S = (mean_force_mag / gamma)
 
     c1_vals = []
     c2_vals = []
@@ -235,8 +245,9 @@ def trainNN(
             # mean_force = fb.mean()
             # S = (mean_force / gamma).item()
 
-            
+            # S = 1
 
+            
             chi_batch, L_chi = generator_action(model, xb, fb, masses, gamma, k_B, T, S)
 
 
@@ -261,15 +272,12 @@ def trainNN(
         if epoch % 125 == 0:
 
             print(f"epoch {epoch:3d} | loss {epoch_loss/len(loader):.6f} |")
-        
+            
         if epoch % 25 == 0:
             c1_vals.append(model.c1.item())
             c2_vals.append(model.c2.item())
         
     return c1_vals, c2_vals
-            
-
-
 
              
 
